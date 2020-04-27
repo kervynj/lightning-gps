@@ -201,13 +201,21 @@ float convert_longitude(char* lon, char* dir)
 }
 
 
-int comms_get_location(char *port, char *nmea_msg)
+void* comms_get_location(void *portname)
 {
+	// GPS data fetch function for pthread
+	// portname - pointer to serial port string
+	// 
+
+	printf("[location fetcher] init serial port\n\r");
+
+	char *nmea_msg = "$GNGGA";
+	char *port = (char *) portname;
 	
 	int i;
 	int serial_port = init_comms(port);
 
-	struct gps_data data; //data to be returned to main
+	struct gps_data *data = malloc(sizeof(struct gps_data)); //data to be returned to main
 
 	// Allocate memory for read buffer, set size according to your needs
 	char read_buf[72];
@@ -216,10 +224,9 @@ int comms_get_location(char *port, char *nmea_msg)
 	int num_bytes = read(serial_port, &read_buf, sizeof(read_buf));
 
 	if (num_bytes < 0) {
-		printf("Error reading: %s", strerror(errno));
+		printf("[location fetcher] Error reading: %s\n\r", strerror(errno));
 		close(serial_port);
 
-		return -1;
 	}
 
 
@@ -235,7 +242,8 @@ int comms_get_location(char *port, char *nmea_msg)
 			char delim[4] = ",";
 			char *ptr = strtok(read_buf, delim);
 			
-			if (strcmp(ptr, nmea_msg) == 0){
+			if (strcmp(ptr, nmea_msg) == 0)
+			{
 				size_t length = strlen(tempstr);
 				char **str=split_nmeaMsg(tempstr, delim, length, entries);
 
@@ -243,6 +251,8 @@ int comms_get_location(char *port, char *nmea_msg)
 
 				if ((gps_fix == 49) | (gps_fix == 50)) 			// check for GNNS or GPS fix, ascii 49="1" or ascii 50="2"
 				{
+
+					printf("[location fetcher] fix aquired!\n\r");	
 
 					char* time = str[1]; 				// UTC time
 					char* lat  = str[2]; 				// latitude  - ddmm.mmmmm
@@ -260,10 +270,10 @@ int comms_get_location(char *port, char *nmea_msg)
 
 
 					// fill gps data struct with receiver response
-					data.t   = format_time(time);
-					data.lat = convert_latitude(lat, ns);
-					data.lon = convert_longitude(lon, ew);
-					data.alt = strtof(alt, NULL);					
+					(*data).t   = format_time(time);
+					(*data).lat = convert_latitude(lat, ns);
+					(*data).lon = convert_longitude(lon, ew);
+					(*data).alt = strtof(alt, NULL);					
 					
 					//free(utc);		
 					
@@ -271,7 +281,7 @@ int comms_get_location(char *port, char *nmea_msg)
 				
 				else {
 				
-					printf("waiting for fix..\n\r");	
+					printf("[location fetcher] waiting for fix..\n\r");	
 
 				}		
 
@@ -281,6 +291,8 @@ int comms_get_location(char *port, char *nmea_msg)
 				   free(str[j]);
 				}
 				free(str);
+				
+
 			}	
 		}
 	}
@@ -288,6 +300,7 @@ int comms_get_location(char *port, char *nmea_msg)
 	free(tempstr);
 
 	close(serial_port);
+	pthread_exit((void *) data);	// kill calling thread and return gps data
 	return 0;
 }
 
@@ -322,14 +335,26 @@ int comms_ubx_configure(char *port)
 
 
 int main(void){
-	
+
+	struct gps_data *location;
+	pthread_t location_fetch;
+	int status=0;
+		
 	char *portname = "/dev/ttySTM1"; // USART2 GPS communication device
 	comms_ubx_configure(portname);
-	char *nmea="$GNGGA";
+
 	
-	while (!(comms_get_location(portname, nmea))){
-		printf("looping\n\r");
+	while(1)
+	{
+		status = pthread_create(&location_fetch, NULL, comms_get_location, portname);
+
+		printf("[main] attempt to create thread with status=%d\n\r", status);	
+
+		pthread_join( location_fetch, &location );
+
+		printf("GPS fix aquired with %f %f at %s\n\r", (*location).lat, (*location).lon, (*location).t);
+	
+		free(location);
 	}
-	
 
 }
