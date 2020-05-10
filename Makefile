@@ -9,7 +9,7 @@ CFLAGS += -mthumb-interwork -mfloat-abi=soft
 CFLAGS += -mfpu=fpv4-sp-d16
 #CFLAGS += -I/home/jim/workspace/stm32f429_mainline_linux/linux-5.6-rc5/usr/include/
 CFLAGS += -L../../stm32f4_uClinux_std-periph-driver_env/uclibc/lib/libc.a
-CFLAGS += -Wall
+CFLAGS += -Wall -g
 LDFLAGS = -static
 
 # header files dependencies, add include files here

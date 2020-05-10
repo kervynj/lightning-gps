@@ -13,6 +13,13 @@
 // project headers
 #include "gps.h"
 
+// global variables
+int available_to_write=1;
+struct gps_data location;				// global buffer for GPS data
+pthread_mutex_t mutex =	PTHREAD_MUTEX_INITIALIZER;	// mutex lock
+pthread_cond_t  new  = PTHREAD_COND_INITIALIZER;	// conditional variable for producer to signal consumer that it has fetched new reading from receiver
+pthread_cond_t  old  = PTHREAD_COND_INITIALIZER;	// conditional variable for consumer to signal producer that it's current reading is old (already written)
+
 
 int init_comms(char *portname){
 	/* Initialize serial communications for GPS 	*/
@@ -105,10 +112,14 @@ int comms_put_ubxCfg(char *port, unsigned char *message, size_t elems){
 }
 
 
-char** split_nmeaMsg(char *msg, char *delimiter, size_t len, int max_entries){
+char** split_nmeaMsg(char *msg, char *delimiter, size_t len, int max_entries)
+{
 
 	int j=0;
+	int elems=0;
 
+	printf("splitting nmea msg - %s", msg);
+	
 	char *ptr = strtok(msg, delimiter); 				// get first substring
 
     	char ** sub_str = malloc(max_entries * sizeof(char*)); 		// allocate memory for 12 substrings of max size 255    	
@@ -119,12 +130,14 @@ char** split_nmeaMsg(char *msg, char *delimiter, size_t len, int max_entries){
 		
 		strcpy(sub_str[j], ptr);				// copy substring to string array		
 
-		//printf("%s\n\r", sub_str[j]);	
+		printf("%s\n\r", sub_str[j]);	
       		ptr = strtok(NULL, delimiter);
 
 		j++;
+		elems++;
 	}
 
+	printf("%d\n\r", elems);
 	return sub_str;
 }
 
@@ -133,7 +146,7 @@ char* format_time(char *utc_time)
 {
 
 	// format time from UTC - hh:mm:ss
-	char* utc = malloc(10*sizeof(char*)); // can't pass back pointer to local data (would be wiped)				
+	char* utc = malloc(11*sizeof(char)); // can't pass back pointer to local data (would be wiped)				
 	char hour[2];
 	char minute[2];
 	char second[2];
@@ -155,6 +168,7 @@ char* format_time(char *utc_time)
 			hr = hr-7;
 
 		sprintf(utc, "%02d:%02d:%02d", hr, min, sec);
+		utc[10] = 0; //null termination
 		return utc;
 	}
 	else
@@ -189,9 +203,9 @@ float convert_longitude(char* lon, char* dir)
 	// convert longitude coordinates - (ddd + (mm.mmmm/60)) (* -1 for W and S)
 	float longitude=0;
 	char lon_deg[3];
-	char lon_min[7];
+	char lon_min[9];
 	strncpy(lon_deg, lon, 3); 	// copy ddd
-	strncpy(lon_min, (lon+3), 7); 	// copy mm.mmmm
+	strncpy(lon_min, (lon+3), 8); 	// copy mm.mmmm
 
 	longitude = atoi(lon_deg) + (strtof(lon_min, NULL)/60);
 
@@ -207,101 +221,202 @@ void* comms_get_location(void *portname)
 	// portname - pointer to serial port string
 	// 
 
-	printf("[location fetcher] init serial port\n\r");
-
 	char *nmea_msg = "$GNGGA";
 	char *port = (char *) portname;
 	
 	int i;
+
+	printf("[location fetcher] init serial port\n\r");
+
 	int serial_port = init_comms(port);
 
-	struct gps_data *data = malloc(sizeof(struct gps_data)); //data to be returned to main
+	struct gps_data *data = NULL ; //= malloc(sizeof(struct gps_data)); // data to be returned to main
 
 	// Allocate memory for read buffer, set size according to your needs
 	char read_buf[72];
+
 	memset(&read_buf, '\0', sizeof(read_buf));
 
-	int num_bytes = read(serial_port, &read_buf, sizeof(read_buf));
+	int num_bytes = read(serial_port, &read_buf, sizeof(read_buf)-1);	// read up to second last byte to preserve null termination
 
 	if (num_bytes < 0) {
 		printf("[location fetcher] Error reading: %s\n\r", strerror(errno));
 		close(serial_port);
-
 	}
 
-
-	char* tempstr = calloc(strlen(read_buf)+1, sizeof(char));
-	strcpy(tempstr, read_buf);	
-	char *p = (char *) read_buf;
+	char* tempstr = (char *) calloc(sizeof(read_buf), sizeof(char));	// fill with NULL
 	int entries=12;
+	int length = strlen(read_buf);
+	int offset=0;
 
-	for (i=0; i < strlen(tempstr) ; i++){
-
-		if (p[i] == '$'){ 	// check for NMEA start character $
-
-			char delim[4] = ",";
-			char *ptr = strtok(read_buf, delim);
-			
-			if (strcmp(ptr, nmea_msg) == 0)
-			{
-				size_t length = strlen(tempstr);
-				char **str=split_nmeaMsg(tempstr, delim, length, entries);
-
-				int gps_fix = (int) str[6][0];				// fix is single char 
-
-				if ((gps_fix == 49) | (gps_fix == 50)) 			// check for GNNS or GPS fix, ascii 49="1" or ascii 50="2"
-				{
-
-					printf("[location fetcher] fix aquired!\n\r");	
-
-					char* time = str[1]; 				// UTC time
-					char* lat  = str[2]; 				// latitude  - ddmm.mmmmm
-					char* ns   = str[3]; 				// N/S
-					char *lon  = str[4]; 				// longitude - dddmm.mmmmm
-					char *ew   = str[5]; 				// E/W
-					char *alt  = str[9];				// elevation (meters)
-
-					//char* utc = format_time(time);			// format time as UTC
-					//float latitude = convert_latitude(lat, ns);	// convert latitude from NMEA to degrees
-					//float longitude = convert_longitude(lon, ew);	// convert longitude from NMEA to degrees 
-					//float elevation = strtof(alt, NULL);
-					
-					//printf("GPS fix aquired with %f %f at %s\n\r", latitude, longitude, utc);	
-
-
-					// fill gps data struct with receiver response
-					(*data).t   = format_time(time);
-					(*data).lat = convert_latitude(lat, ns);
-					(*data).lon = convert_longitude(lon, ew);
-					(*data).alt = strtof(alt, NULL);					
-					
-					//free(utc);		
-					
-				}
-				
-				else {
-				
-					printf("[location fetcher] waiting for fix..\n\r");	
-
-				}		
-
-				// release memory
-				for (int j = 0; j < entries; j++)
-				{
-				   free(str[j]);
-				}
-				free(str);
-				
-
-			}	
+	// check when NMEA message begins, UART read could start anywhere
+	for (i=0; i < length ; i++){
+		if (read_buf[i] == '$'){
+			offset =i;
+			strncpy(tempstr, read_buf + offset, (strlen(read_buf)-offset+1));
+			printf("%s \n\r", tempstr);
 		}
 	}
 
-	free(tempstr);
+
+	if (tempstr[0] == '$')	// check for NMEA start character $
+	{ 	
+
+		data = malloc(sizeof(struct gps_data)); // data to be returned to main
+		
+		char delim[4] = ",";
+
+		char *ptr = strtok(read_buf, delim);	// tokenize to first comma
+
+		if (strcmp(ptr, nmea_msg) == 0)
+		{
+			size_t length = strlen(tempstr);
+			char **str=split_nmeaMsg(tempstr, delim, length, entries);
+
+			printf("[location fetcher] fix aquired!\n\r");	
+
+			char* time = str[1]; 				// UTC time
+			char* lat  = str[2]; 				// latitude  - ddmm.mmmmm
+			char* ns   = str[3]; 				// N/S
+			char* lon  = str[4]; 				// longitude - dddmm.mmmmm
+			int   gps_fix= (int) str[6][0];			// gps fix
+			char* ew   = str[5]; 				// E/W
+			char* alt  = str[9];				// elevation (meters)
+
+			char* utc_time;
+
+			utc_time = format_time(time);
+
+			// fill gps data struct with receiver response
+			//(*data).t   = format_time(time);
+			strncpy((*data).t, utc_time, 10);
+			(*data).fix = gps_fix;
+			(*data).lat = convert_latitude(lat, ns);
+			(*data).lon = convert_longitude(lon, ew);
+			(*data).alt = strtof(alt, NULL);						
+		
+			// release memory
+			for (int j = 0; j < entries; j++)
+			{
+			   free(str[j]);
+			}
+			free(str);
+			free(utc_time);
+		}	
+		else{
+			printf("message did not match %s\n\r", nmea_msg);
+		}
+
+		free(tempstr);
+	}
 
 	close(serial_port);
-	pthread_exit((void *) data);	// kill calling thread and return gps data
-	return 0;
+	return ((void *) data);
+}
+
+
+void* gpx_fetch(void *portname)
+{
+	char* port = (char *) portname;
+	struct gps_data *receiver_data;
+
+	while(1)
+	{	
+		pthread_mutex_lock(&mutex);
+
+		while (available_to_write==0){						// check if we can write new data to buffer
+			printf("[producer] sleeping until buffer is free\n\r");
+			pthread_cond_wait(&new, &mutex);				// sleep calling thread if fresh data is still in coordinate buffer
+		}
+
+		receiver_data = (struct gps_data*) comms_get_location(port);
+
+		if (receiver_data != NULL){
+			memcpy(&location, receiver_data, sizeof(struct gps_data));
+			free(receiver_data);
+
+			if (((location).fix == 49) | ((location).fix == 50))		// only wake writing thread if gps fix present
+			{
+				available_to_write = 0; 
+				pthread_cond_signal(&old);				// wake sleeping threads which are waiting for new coordinates
+			}
+		}	
+
+		pthread_mutex_unlock(&mutex);						// release lock
+	}
+}
+
+
+void gpx_file_init(char *filename)
+{
+
+	printf("attempting to initialize '%s'", filename);
+	char* fname = filename;
+	FILE *fp;
+	fp = fopen(fname, "w");
+
+	if (fp==NULL){
+		printf("file %s failed to open!", filename);
+	}
+
+	fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?> \n\
+				<gpx version=\"1.1\" creator=\"lightning-gps\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd\" \n\
+					<trk> \n\
+						<name>test</name> \n\
+  						<type>1</type> \n\
+  						<trkseg>\n");
+	fclose(fp);
+}
+
+
+void gpx_write_trk_seg(char *filename)
+{
+
+	printf("attempting to open file for writing\n\r");
+	FILE *fp;
+	fp = fopen(filename, "a");
+
+	if (fp==NULL){
+		printf("file %s failed to open!", filename);
+	}
+
+	printf("attempting to write wpt to file\n\r");
+
+	fprintf(fp, "\t<trkpt lat=\"%f\" lon=\"%f\">\n\
+					<ele>%f</ele>\n\
+					<time>%s</time>\n\
+						<extensions>\n\
+     						<gpxtpx:TrackPointExtension>\n\
+     						</gpxtpx:TrackPointExtension>\n\
+    					</extensions>\n\
+    				</trkpt>\n", (location).lat, (location).lon, (location).alt, (location).t); 
+	fclose(fp);
+
+	printf("finished writing waypoint to file\n\r");
+}
+
+
+void* gpx_write(void *filename)
+{
+
+	char* file = "/media/test.gpx";
+
+	while(1){
+		pthread_mutex_lock(&mutex); 						// lock before sleeping to ensure no race condition for child waking parent 
+		while(available_to_write==1){						// check if buffer is OK to be written to
+			printf("[gpx_write] sleeping until new data is available\n\r");
+			pthread_cond_wait(&old, &mutex); 				// block calling thread until producer updates buffer
+											// wait releases mutex lock automatically
+		}
+
+		printf("[gpx_write] GPS fix aquired with %f %f at %s\n\r", (location).lat, (location).lon, (location).t); // consume data now that is is available
+		printf("attempting to open file for appending\n\r");
+		//usleep(10000);		
+		gpx_write_trk_seg(file);
+		available_to_write=1;							// change state variable now that data has been read
+		pthread_cond_signal(&new);						// wake sleeping threads which are waiting for new coordinates
+		pthread_mutex_unlock(&mutex); 						// unlock mutex
+	}
 }
 
 
@@ -324,37 +439,35 @@ int comms_ubx_configure(char *port)
 	unsigned char gsa_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x02\x00\x00\x00\x00\x00\x00\x01\x31"; // disable NMEA GxGSA messages
 	comms_put_ubxCfg(port, gsa_msg, sizeof(gsa_msg));
 
-	//unsigned char gga_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x00\x00\x00\x00\x00\x00\x00\xFF\x23"; // disable NMEA GxGGA messages
-	//comms_put_ubxCfg(port, gga_msg, sizeof(gga_msg));
-
-	// configure constellations for receiver 
-	//unsigned char config_msg[] = "\xB5\x62\x06\x3E\x0C\x00\x00\x00\x00\x01\x00\x04\x20\x00\x01\x00\x00\x01\x77\x94"; 
-	//comms_put_ubxCfg(port, config_msg, sizeof(config_msg));
 	return 0;
 }
 
 
 int main(void){
 
-	struct gps_data *location;
 	pthread_t location_fetch;
+	pthread_t location_consume;
 	int status=0;
 		
-	char *portname = "/dev/ttySTM1"; // USART2 GPS communication device
+	char *portname  = "/dev/ttySTM1"; 	// USART2 GPS communication device
+	char *file_name = "/media/test.gpx"; 	// test file to write to
+	comms_ubx_configure(portname);
 	comms_ubx_configure(portname);
 
+	gpx_file_init(file_name);
+	//gpx_file_write_location(file_name);
 	
 	while(1)
 	{
-		status = pthread_create(&location_fetch, NULL, comms_get_location, portname);
-
+		status = pthread_create(&location_fetch, NULL, gpx_fetch, portname);
 		printf("[main] attempt to create thread with status=%d\n\r", status);	
 
-		pthread_join( location_fetch, &location );
+		status = pthread_create(&location_consume, NULL, gpx_write, NULL);
+		printf("[main] attempt to create thread with status=%d\n\r", status);	
 
-		printf("GPS fix aquired with %f %f at %s\n\r", (*location).lat, (*location).lon, (*location).t);
-	
-		free(location);
+		pthread_join( location_fetch, NULL);
+		pthread_join( location_consume,  NULL);
+
 	}
 
 }
