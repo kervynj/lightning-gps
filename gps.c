@@ -359,12 +359,13 @@ void gpx_file_init(char *filename)
 		printf("file %s failed to open!", filename);
 	}
 
-	fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?> \n\
-				<gpx version=\"1.1\" creator=\"lightning-gps\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd\" \n\
-					<trk> \n\
-						<name>test</name> \n\
-  						<type>1</type> \n\
-  						<trkseg>\n");
+	fprintf(fp, 
+"<?xml version=\"1.0\" encoding=\"UTF-8\"?> \n\
+<gpx version=\"1.1\" creator=\"lightning-gps\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd\" \n\
+ <trk> \n\
+  <name>test</name> \n\
+  <type>1</type> \n\
+  <trkseg>\n\r");
 	fclose(fp);
 }
 
@@ -382,14 +383,15 @@ void gpx_write_trk_seg(char *filename)
 
 	printf("attempting to write wpt to file\n\r");
 
-	fprintf(fp, "\t<trkpt lat=\"%f\" lon=\"%f\">\n\
-					<ele>%f</ele>\n\
-					<time>%s</time>\n\
-						<extensions>\n\
-     						<gpxtpx:TrackPointExtension>\n\
-     						</gpxtpx:TrackPointExtension>\n\
-    					</extensions>\n\
-    				</trkpt>\n", (location).lat, (location).lon, (location).alt, (location).t); 
+	fprintf(fp, 
+"   <trkpt lat=\"%f\" lon=\"%f\">\n\
+    <ele>%f</ele>\n\
+    <time>%s</time>\n\
+    <extensions>\n\
+     <gpxtpx:TrackPointExtension>\n\
+     </gpxtpx:TrackPointExtension>\n\
+    </extensions>\n\
+   </trkpt>\n\r", (location).lat, (location).lon, (location).alt, (location).t); 
 	fclose(fp);
 
 	printf("finished writing waypoint to file\n\r");
@@ -415,7 +417,7 @@ void* gpx_write(void *filename)
 		gpx_write_trk_seg(file);
 		available_to_write=1;							// change state variable now that data has been read
 		pthread_cond_signal(&new);						// wake sleeping threads which are waiting for new coordinates
-		pthread_mutex_unlock(&mutex); 						// unlock mutex
+		pthread_mutex_unlock(&mutex); 					// unlock mutex
 	}
 }
 
@@ -438,6 +440,9 @@ int comms_ubx_configure(char *port)
 
 	unsigned char gsa_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x02\x00\x00\x00\x00\x00\x00\x01\x31"; // disable NMEA GxGSA messages
 	comms_put_ubxCfg(port, gsa_msg, sizeof(gsa_msg));
+
+	unsigned char zda_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x08\x00\x01\x00\x00\x00\x00\x08\x60"; // enable NMEA GxZDA messages
+	comms_put_ubxCfg(port, zda_msg, sizeof(zda_msg));
 
 	return 0;
 }
