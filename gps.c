@@ -216,12 +216,12 @@ float convert_longitude(char* lon, char* dir)
 }
 
 
-void comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
+int comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 {
 	// GPS data fetch function for pthread
 	// portname - pointer to serial port string
 	// 
-
+	int ret=0;
 	char *port = (char *) portname;
 
 	printf("[comms_get_nmea_msg] init serial port\n\r");
@@ -258,7 +258,7 @@ void comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 			break;
 		}
 	}
-
+	
 
 	strncpy(tempstr, read_buf + offset, (length)-offset);
 	
@@ -270,6 +270,7 @@ void comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 	char nmea_id[6];
 	memset(&nmea_id, '\0', sizeof(nmea_id));
 
+
 	while (ptr !=NULL){
 
 		//printf("'%s'\n\r", ptr);
@@ -280,6 +281,7 @@ void comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 			printf("[comms_get_nmea_msg] message received for %s\n\r", nmea_id);
 			strncpy(found_msg, ptr, sizeof(found_msg)-1); // preserve null terminator
 			split_nmeaMsg(found_msg, str, sizeof(read_buf), entries);
+			ret=1;
 			break;
 		}
 
@@ -287,11 +289,12 @@ void comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 	}
 
 	if(found_msg[0]=='\0'){
-		printf("[comms_get_nmea_msg] ERROR - no message received for %s\n\r", nmea_id);
+		printf("[comms_get_nmea_msg] ERROR - did not receive %s\n\r", nmea_msg);
 	}
 	
 	free(tempstr);
 	close(serial_port);
+	return ret;
 }
 
 
@@ -309,36 +312,44 @@ void* comms_get_location(void *portname)
 	char **time_entries = malloc(time_fields * sizeof(char*)); 		// allocate memory for 12 substrings of max size 255
 	char utc_date[21];
 	memset(&utc_date, '\0', sizeof(utc_date));
+	int ret=1;
 
 	// fetch GPS coordinates from GNGGA message
-	comms_get_nmea_msg(port, coordinates_msg, coordinate_entries, coordinates_fields); // get sub-string array of nmea msg entries
-
-	char* lat  = coordinate_entries[2]; 				// latitude  - ddmm.mmmmm
-	char* ns   = coordinate_entries[3]; 				// N/S
-	char* lon  = coordinate_entries[4]; 				// longitude - dddmm.mmmmm
-	int   gps_fix= (int) coordinate_entries[6][0];		// gps fix
-	char* ew   = coordinate_entries[5]; 				// E/W
-	char* alt  = coordinate_entries[9];				// elevation (meters)
-
+	ret &= comms_get_nmea_msg(port, coordinates_msg, coordinate_entries, coordinates_fields); // get sub-string array of nmea msg entries
 	
 	// fetch UTC time from GNZDA message
-	comms_get_nmea_msg(port, time_msg, time_entries, time_fields); // get sub-string array of nmea msg entries
+	ret &= comms_get_nmea_msg(port, time_msg, time_entries, time_fields); // get sub-string array of nmea msg entries
 
-	int year = atoi(time_entries[4]);
-	int month = atoi(time_entries[3]);
-	int day = atoi(time_entries[2]);
-	char *utc_time = format_time(time_entries[1]);
+	if(ret)
+	{
+		char* lat  = coordinate_entries[2]; 				// latitude  - ddmm.mmmmm
+		char* ns   = coordinate_entries[3]; 				// N/S
+		char* lon  = coordinate_entries[4]; 				// longitude - dddmm.mmmmm
+		int   gps_fix= (int) coordinate_entries[6][0];		// gps fix
+		char* ew   = coordinate_entries[5]; 				// E/W
+		char* alt  = coordinate_entries[9];				// elevation (meters)
 
-	sprintf(utc_date, "%04d-%02d-%02dT%sZ", year, month, day, utc_time);
+		int year = atoi(time_entries[4]);
+		int month = atoi(time_entries[3]);
+		int day = atoi(time_entries[2]);
+		char *utc_time = format_time(time_entries[1]);
 
-	printf("[comms_get_location] updated GPS global variables at time %s\n\r", utc_date);
+		sprintf(utc_date, "%04d-%02d-%02dT%sZ", year, month, day, utc_time);
 
-	// fill gps data struct with receiver response
-	strncpy((*data).t, utc_date, 21);
-	(*data).fix = gps_fix;
-	(*data).lat = convert_latitude(lat, ns);
-	(*data).lon = convert_longitude(lon, ew);
-	(*data).alt = strtof(alt, NULL);						
+		printf("[comms_get_location] updated GPS global variables at time %s\n\r", utc_date);
+
+		// fill gps data struct with receiver response
+		strncpy((*data).t, utc_date, 21);
+		(*data).fix = gps_fix;
+		(*data).lat = convert_latitude(lat, ns);
+		(*data).lon = convert_longitude(lon, ew);
+		(*data).alt = strtof(alt, NULL);
+		
+		free(utc_time);
+	}			
+	else{
+		printf("[comms_get_location] failed to update GPS global variables\n\r");
+	}			
 
 	// release memory
 	for (int j = 0; j < coordinates_fields; j++)
@@ -352,7 +363,6 @@ void* comms_get_location(void *portname)
 	   free(time_entries[k]);
 	}
 	free(time_entries);
-	free(utc_time);
 
 	return ((void *) data);
 }
