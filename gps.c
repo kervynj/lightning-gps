@@ -162,13 +162,15 @@ char* format_time(char *utc_time)
 		int min=atoi(minute);
 		int sec=atoi(second);
 
+		printf("%d\n\r", hr);
+
 		//if ( hr < 7 ){		// convert 24hr time, UTC is 7hrs ahead of PST
 		//	hr = hr+5; 
 		//}
 		//else
 		//	hr = hr-7;
 
-		sprintf(utc, "%02d:%02d:%02d\0", hr, min, sec);
+		sprintf(utc, "%02d:%02d:%02d", hr, min, sec);
 		utc[10] = '\0'; //null termination
 		return utc;
 	}
@@ -400,10 +402,36 @@ void* gpx_fetch(void *portname)
 }
 
 
+int gpx_fs_mount(char* blk, char* loc)
+{
+
+	int ret = 0;
+	int attempts;
+
+	char* cmd;
+	cmd = calloc(50, sizeof(char));
+	sprintf(cmd, "mount -t ext3 %s %s", blk, loc); 
+
+	for (attempts=0; attempts<3; attempts++)
+	{
+		printf("[gpx_fs_mount] attempting to mount %s on %s...\n\r", blk, loc);
+		ret = system(cmd); // mount block device on specified location
+
+		if (ret==0)
+		{
+			printf("[gps_fs_mount] mounted %s on %s with exit-code %d\n\r", blk, loc, ret);
+			break;
+		}
+	}
+
+	return ret;
+}
+
+
 void gpx_file_init(char *filename)
 {
 
-	printf("[gpx_file_init] attempting to initialize '%s'", filename);
+	printf("[gpx_file_init] attempting to initialize '%s'\n\r", filename);
 	char* fname = filename;
 	FILE *fp;
 	fp = fopen(fname, "w");
@@ -512,8 +540,15 @@ int main(void){
 	comms_ubx_configure(portname);
 	comms_ubx_configure(portname);
 
+	char* device = "/dev/mmcblk0p1";
+	char* location = "/media";
+	
+	if (gpx_fs_mount(device, location) != 0)
+	{
+		printf("[main] WARNING ! failed to mount %s, gpx will be written to RAM\n\r", device);
+	}
+
 	gpx_file_init(file_name);
-	//gpx_file_write_location(file_name);
 	
 	while(1)
 	{
@@ -525,6 +560,5 @@ int main(void){
 
 		pthread_join( location_fetch, NULL);
 		pthread_join( location_consume,  NULL);
-
 	}
 }
