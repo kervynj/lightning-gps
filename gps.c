@@ -14,8 +14,10 @@
 #include "gps.h"
 
 // global variables
+volatile speed_t speed = B9600; 
 int available_to_write=1;
-struct gps_data location;				// global buffer for GPS data
+struct termios tty;
+struct gps_data location;							// global buffer for GPS data
 pthread_mutex_t mutex =	PTHREAD_MUTEX_INITIALIZER;	// mutex lock
 pthread_cond_t  new  = PTHREAD_COND_INITIALIZER;	// conditional variable for producer to signal consumer that it has fetched new reading from receiver
 pthread_cond_t  old  = PTHREAD_COND_INITIALIZER;	// conditional variable for consumer to signal producer that it's current reading is old (already written)
@@ -28,8 +30,10 @@ int init_comms(char *portname){
 
 	int serial_port = open(portname, O_RDWR); 
 
-	// Create new termios struc, we call it 'tty' for convention
-	struct termios tty;
+	if (serial_port < 0) {
+    printf("Error %i from open: %s\n", errno, strerror(errno));
+	}	
+
 	memset(&tty, 0, sizeof tty);
 
 	// Read in existing settings, and handle any error
@@ -43,7 +47,7 @@ int init_comms(char *portname){
 	tty.c_cflag &= ~CRTSCTS; // Disable RTS/CTS hardware flow control (most common)
 	tty.c_cflag |= CREAD | CLOCAL; // Turn on READ & ignore ctrl lines (CLOCAL = 1)
 
-	tty.c_lflag &= ~ICANON;
+
 	tty.c_lflag &= ~ECHO; // Disable echo
 	tty.c_lflag &= ~ECHOE; // Disable erasure
 	tty.c_lflag &= ~ECHONL; // Disable new-line echo
@@ -53,15 +57,14 @@ int init_comms(char *portname){
 
 	tty.c_oflag &= ~OPOST; // Prevent special interpretation of output bytes (e.g. newline chars)
 	tty.c_oflag &= ~ONLCR; // Prevent conversion of newline to carriage return/line feed
-	// tty.c_oflag &= ~OXTABS; // Prevent conversion of tabs to spaces (NOT PRESENT ON LINUX)
-	// tty.c_oflag &= ~ONOEOT; // Prevent removal of C-d chars (0x004) in output (NOT PRESENT ON LINUX)
 
-	tty.c_cc[VTIME] = 3;    // Wait for up to 10 deciseconds with line idle
-	tty.c_cc[VMIN] = 150;	// if nbytes is not immediately satisfied, block for up to 50 char before returning on read()
+	tty.c_lflag &= ~ICANON; // enable non-canonical read
+	tty.c_cc[VTIME] = 0;    // no interbyte timeout
+	tty.c_cc[VMIN] = 200;	// if nbytes is not immediately satisfied, block for up to 50 char before returning on read()
 
-	// Set in/out baud rate to be 9600
-	cfsetispeed(&tty, B9600);
-	cfsetospeed(&tty, B9600);
+	// Set in/out baud rate 
+	cfsetispeed(&tty, speed);
+	cfsetospeed(&tty, speed);
 
 	// Save tty settings, also checking for error
 	if (tcsetattr(serial_port, TCSANOW, &tty) != 0) {
@@ -72,43 +75,54 @@ int init_comms(char *portname){
 
 	}
 
-
-int comms_put_ubxCfg(char *port, unsigned char *message, size_t elems){
-
-
-	int serial_port = init_comms(port);
-
-	write(serial_port, message, elems);
-
+int comms_check_ubxAck(int port){
+	
+	int i;
+	int ret=1;
+	unsigned char *p = (unsigned char *) read_buf;
 	// Allocate memory for read buffer, set size according to your needs
-	char read_buf [510];
+	char read_buf [256];
 	memset(&read_buf, '\0', sizeof(read_buf));
-
-	int num_bytes = read(serial_port, &read_buf, sizeof(read_buf));
+	int num_bytes = read(port, &read_buf, sizeof(read_buf));
 
 	if (num_bytes < 0) {
 		printf("Error reading: %s", strerror(errno));
-		close(serial_port);
-
-		return -1;
+		return ret;
 	}
-	
-	int i;
-	unsigned char *p = (unsigned char *) read_buf;
-	
-	for (i=0; i < 72 ; i++)
+
+	for (i=0; i < num_bytes ; i++)
 	{
 		// check for UBX CFG MSG Header AND ACK message CLASS
 		if ((p[i] == '\xB5')&&(p[i+1] == '\x62')&&(p[i+2] == '\x05')){
-	    		printf("[comms_put_ubxCfg] received UBX-HDR 0xB562 CLASS 0x05 with ID 0x%02x\n\r", p[i+3]);
+    		printf("[comms_put_ubxCfg] received UBX-HDR 0xB562 CLASS 0x05 with ID 0x%02x\n\r", p[i+3]);
+    		ret=0;
 			break;
 		}
+	}
+	if (ret){
+		printf("[comms_put_ubxCfg] [ERROR] failed to receive UBX-ACK-ACK\n\r");
+	}
+	return ret;
+}
 
+int comms_put_ubxCfg(char *port, unsigned char *message, size_t elems){
+
+	int ret=0;
+	int serial_port = init_comms(port);
+	usleep(1000);
+    tcflush(serial_port, TCIOFLUSH);
+	write(serial_port, message, elems);
+
+	if(message[3] !='\x00'){
+		ret = comms_check_ubxAck(serial_port); // check for ACK unless message is baud rate change
+	}
+	else{
+		printf("warning, ignoring ack\n\r");
 	}
 
 	close(serial_port);
 
-	return 0;
+	return ret;
 }
 
 
@@ -132,20 +146,16 @@ void split_nmeaMsg(char *msg, char **str, size_t len, int max_entries)
 		
 		strncpy(str[j], ptr, len-1);				// copy substring to string array		
 
-		//printf("%s\n\r", str[j]);	
   		ptr = strtok(NULL, delimiter);
 
 		j++;
 		elems++;
 	}
-
-	//printf("%d\n\r", elems);
 }
 
 
 char* format_time(char *utc_time)
 {
-
 	// format time from UTC - hh:mm:ss
 	char* utc = malloc(11*sizeof(char)); // can't pass back pointer to local data (would be wiped)				
 	char hour[2];
@@ -161,14 +171,6 @@ char* format_time(char *utc_time)
 		int hr =atoi(hour);
 		int min=atoi(minute);
 		int sec=atoi(second);
-
-		printf("%d\n\r", hr);
-
-		//if ( hr < 7 ){		// convert 24hr time, UTC is 7hrs ahead of PST
-		//	hr = hr+5; 
-		//}
-		//else
-		//	hr = hr-7;
 
 		sprintf(utc, "%02d:%02d:%02d", hr, min, sec);
 		utc[10] = '\0'; //null termination
@@ -222,16 +224,17 @@ int comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 {
 	// GPS data fetch function for pthread
 	// portname - pointer to serial port string
-	// 
+	// nmea_msg - GNSS msg type to parse UART buffer for
+	// str 		- pointer to string array for data to copy to
+	// entries  - dimension of string array
+	
 	int ret=0;
 	char *port = (char *) portname;
 
 	printf("[comms_get_nmea_msg] init serial port\n\r");
 	
 	int serial_port = init_comms(port);
-
-	// Allocate memory for read buffer, set size according to your needs
-	char read_buf[255];
+	char read_buf[256];
 	memset(&read_buf, '\0', sizeof(read_buf));
 	int num_bytes = read(serial_port, &read_buf, sizeof(read_buf)-1);	// read up to second last byte to preserve null termination
 
@@ -243,58 +246,28 @@ int comms_get_nmea_msg(void *portname, char* nmea_msg, char **str, int entries)
 		printf("[comms_get_nmea_msg] received message, looking for: %s\n\r", nmea_msg);
 	}
 
-	char* tempstr = (char *) calloc(sizeof(read_buf), sizeof(char));	// fill with NULL
-	//char tempstr[sizeof(read_buf)];
-	//memset(&tempstr, '\0', sizeof(read_buf));
-	char delim[] = "$\n";
 	int length = sizeof(read_buf);
 	int offset=0;
+	char *ptr;
 
 	// check when NMEA message begins, UART read could start anywhere with multiple messages in receive buffer
-	for (int i=0; i < length ; i++)
+	for (int i=0; i < (length-sizeof(nmea_msg)) ; i++)
 	{
-		if (read_buf[i]=='$')
+ 		if (strncmp((char*)(read_buf+i), nmea_msg, sizeof(nmea_msg)-1)==0)
 		{
 			offset=i;
-			//printf("offset=%d\n\r", offset);
-			break;
-		}
-	}
-	
-
-	strncpy(tempstr, read_buf + offset, (length)-offset);
-	
-	//printf("%s\n\r", tempstr);
-	//strncpy(tempstr, read_buf, sizeof(read_buf)-1);
-	char found_msg[sizeof(read_buf)];
-	memset(&found_msg, '\0', sizeof(found_msg));
-	char *ptr = strtok(tempstr, delim);	// tokenize to first $
-	char nmea_id[6];
-	memset(&nmea_id, '\0', sizeof(nmea_id));
-
-
-	while (ptr !=NULL){
-
-		//printf("'%s'\n\r", ptr);
-		strncpy(nmea_id, ptr, sizeof(nmea_id)-1); // preserve null terminator
-		//printf("%s\n\r", nmea_id);
-
-		if(strcmp(nmea_id, nmea_msg)==0){
-			printf("[comms_get_nmea_msg] message received for %s\n\r", nmea_id);
-			strncpy(found_msg, ptr, sizeof(found_msg)-1); // preserve null terminator
-			split_nmeaMsg(found_msg, str, sizeof(read_buf), entries);
+			printf("[comms_get_nmea_msg] message received for %s\n\r", nmea_msg);
+			ptr = strtok((char*)read_buf+offset, "\n");
+			split_nmeaMsg(ptr, str, sizeof(read_buf), entries);
 			ret=1;
 			break;
 		}
-
-		ptr = strtok(NULL, delim);
 	}
 
-	if(found_msg[0]=='\0'){
+	if(! ret){
 		printf("[comms_get_nmea_msg] ERROR - did not receive %s\n\r", nmea_msg);
 	}
 	
-	free(tempstr);
 	close(serial_port);
 	return ret;
 }
@@ -306,21 +279,24 @@ void* comms_get_location(void *portname)
 	char* port = (char *) portname;
 	char* coordinates_msg = "GNGGA\0";
 	char* time_msg = "GNZDA\0";
-	int coordinates_fields = 15;	// 15 fields in GNGGA msg
-	int time_fields = 7;			// 8 fields in GNZDA msg
-	struct gps_data *data = NULL;
-	data = malloc(sizeof(struct gps_data)); // gps coordinate struct data to be returned to main
-	char **coordinate_entries = malloc(coordinates_fields * sizeof(char*)); 		// allocate memory for 12 substrings of max size 255
+	int coordinates_fields = 15;						// 15 fields in GNGGA msg
+	int time_fields = 7;							// 8 fields in GNZDA msg
+	char **coordinate_entries = malloc(coordinates_fields * sizeof(char*)); // allocate memory for 12 substrings of max size 255
 	char **time_entries = malloc(time_fields * sizeof(char*)); 		// allocate memory for 12 substrings of max size 255
 	char utc_date[21];
 	memset(&utc_date, '\0', sizeof(utc_date));
 	int ret=1;
 
+	struct gps_data *data = NULL;
+	data = malloc(sizeof(struct gps_data)); 				// gps coordinate struct data to be returned to main
+	(*data).t[0] = '\0';									// fill as empty to check on return for error condition 
+
+
 	// fetch GPS coordinates from GNGGA message
 	ret &= comms_get_nmea_msg(port, coordinates_msg, coordinate_entries, coordinates_fields); // get sub-string array of nmea msg entries
 	
 	// fetch UTC time from GNZDA message
-	ret &= comms_get_nmea_msg(port, time_msg, time_entries, time_fields); // get sub-string array of nmea msg entries
+	ret &= comms_get_nmea_msg(port, time_msg, time_entries, time_fields); 	// get sub-string array of nmea msg entries
 
 	if(ret)
 	{
@@ -329,7 +305,7 @@ void* comms_get_location(void *portname)
 		char* lon  = coordinate_entries[4]; 				// longitude - dddmm.mmmmm
 		int   gps_fix= (int) coordinate_entries[6][0];		// gps fix
 		char* ew   = coordinate_entries[5]; 				// E/W
-		char* alt  = coordinate_entries[9];				// elevation (meters)
+		char* alt  = coordinate_entries[9];					// elevation (meters)
 
 		int year = atoi(time_entries[4]);
 		int month = atoi(time_entries[3]);
@@ -370,6 +346,22 @@ void* comms_get_location(void *portname)
 }
 
 
+int gpx_fix_LED(int val)
+{
+
+	int ret=0;
+
+	char* cmd="gpioset gpiochip1 0=1";
+	ret = system(cmd); // mount block device on specified location
+
+	if (ret==0)
+	{
+		printf("[gpx_fix_LED] set PB0=%d with exit-code %d\n\r", val, ret);
+	}
+	return ret;
+}
+
+
 void* gpx_fetch(void *portname)
 {
 	char* port = (char *) portname;
@@ -386,13 +378,14 @@ void* gpx_fetch(void *portname)
 
 		receiver_data = (struct gps_data*) comms_get_location(port);
 
-		if (receiver_data != NULL){
+		if ((*receiver_data).t != NULL){
 			memcpy(&location, receiver_data, sizeof(struct gps_data));
 			free(receiver_data);
 
 			if (((location).fix == 49) | ((location).fix == 50))		// only wake writing thread if gps fix present
 			{
 				available_to_write = 0; 
+				gpx_fix_LED((int) 1);
 				pthread_cond_signal(&old);				// wake sleeping threads which are waiting for new coordinates
 			}
 		}	
@@ -506,26 +499,37 @@ void* gpx_write(void *filename)
 int comms_ubx_configure(char *port)
 {
 
-	// disable default NMEA messages from receiver
+	int ret=0;
 	unsigned char gsv_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x03\x00\x00\x00\x00\x00\x00\x02\x38"; // disable NMEA GxGSV messages
-	comms_put_ubxCfg(port, gsv_msg, sizeof(gsv_msg));
+	ret |= comms_put_ubxCfg(port, gsv_msg, sizeof(gsv_msg));
 
 	unsigned char gll_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x01\x00\x00\x00\x00\x00\x00\x00\x2A"; // disable NMEA GxGLL messages
-	comms_put_ubxCfg(port, gll_msg, sizeof(gll_msg));
+	ret |= comms_put_ubxCfg(port, gll_msg, sizeof(gll_msg));
 
 	unsigned char vtg_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x05\x00\x00\x00\x00\x00\x00\x04\x46"; // disable NMEA GxVTG messages
-	comms_put_ubxCfg(port, vtg_msg, sizeof(vtg_msg));
+	ret |= comms_put_ubxCfg(port, vtg_msg, sizeof(vtg_msg));
 
 	unsigned char rmc_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x04\x00\x00\x00\x00\x00\x00\x03\x3F"; // disable NMEA GxRMC messages
-	comms_put_ubxCfg(port, rmc_msg, sizeof(rmc_msg));
+	ret |= comms_put_ubxCfg(port, rmc_msg, sizeof(rmc_msg));
 
 	unsigned char gsa_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x02\x00\x00\x00\x00\x00\x00\x01\x31"; // disable NMEA GxGSA messages
-	comms_put_ubxCfg(port, gsa_msg, sizeof(gsa_msg));
+	ret |= comms_put_ubxCfg(port, gsa_msg, sizeof(gsa_msg));
 
 	unsigned char zda_msg[] = "\xB5\x62\x06\x01\x08\x00\xF0\x08\x00\x01\x00\x00\x00\x00\x08\x60"; // enable NMEA GxZDA messages
-	comms_put_ubxCfg(port, zda_msg, sizeof(zda_msg));
+	ret |= comms_put_ubxCfg(port, zda_msg, sizeof(zda_msg));
+	
+	// set baud rate
+	unsigned char prt_msg[] = "\xB5\x62\x06\x00\x14\x00\x01\x00\x00\x00\xD0\x08\x00\x00\x00\x4B\x00\x00\x23\x00\x03\x00\x00\x00\x00\x00\x64\x37"; // enable UART1 19200 baud
+	comms_put_ubxCfg(port, prt_msg, sizeof(prt_msg)); // ignore ack
 
-	return 0;
+	speed = B19200; 
+	
+	// set msg rate 
+	unsigned char cfg_msg[] = "\xB5\x62\x06\x08\x06\x00\xC8\x00\x01\x00\x01\x00\xDE\x6A"; // set measurement period as 200ms
+	ret |= comms_put_ubxCfg(port, cfg_msg, sizeof(cfg_msg));
+	printf("[comms_ubx_configure] completed UBX config with status %d\n", ret);
+
+	return ret;
 }
 
 
@@ -535,11 +539,9 @@ int main(void){
 	pthread_t location_consume;
 	int status=0;
 		
-	char *portname  = "/dev/ttySTM1"; 	// USART2 GPS communication device
+	char *portname  = "/dev/ttySTM1"; 		// USART2 GPS communication device
 	char *file_name = "/media/test.gpx"; 	// test file to write to
 	comms_ubx_configure(portname);
-	comms_ubx_configure(portname);
-
 	char* device = "/dev/mmcblk0p1";
 	char* location = "/media";
 	
